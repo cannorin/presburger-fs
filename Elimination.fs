@@ -68,7 +68,7 @@ let inline eliminateCompareOps (fml: PrenexNNFFormula<_>) : PrenexNNFLtFormula<_
   let inline compeq t u = AFComparison (CompEq, t, u) |> NNFAtomic |> G0
   let rec f = function
     | Gn (n, xs) -> Gn (n, xs |> Seq.map f)
-    | G1 ((), _) -> failwith "impossible"
+    | G1 (Empty, _) -> failwith "impossible"
     | G0 (NNFAtomic a) ->
      match a with
         | AFTrue  -> NNFAtomic AFTrue |> G0
@@ -231,11 +231,13 @@ let inline eliminateQuantifiers (fml: PrenexNNFLtFormula<_>) : EliminatedFormula
     | PFMatrix _ -> failwith "impossible"
   eliminate fml
 
-let inline eliminate fml =
+let inline eliminate (fml: Formula< ^a >) =
   fml |> eliminateForall
       |> toPrenexForm
       |> toNegationNormalForm
       |> eliminateCompareOps
+      |> map reduce
       |> removeDuplicatesInAtomic
       |> normalizeAllCoefficientsToOne
       |> eliminateQuantifiers
+      |> map reduce

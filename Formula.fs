@@ -76,8 +76,8 @@ AtomicFormula<'Comparison, 'Term> =
         | AFTrue -> Some true | AFFalse -> Some false
         | AFDivisiblity dc -> isTautology dc
         | AFComparison (c, l, r) -> compareBy c l r
-    static member AtomicTrue = AFTrue
-    static member AtomicFalse = AFFalse
+    static member AtomicTrue  : AtomicFormula<'Comparison, 'Term> = AFTrue
+    static member AtomicFalse : AtomicFormula<'Comparison, 'Term> = AFFalse
 
 ///     Monad<'G0>, Foldable<'G0>, Tautology
 [<StructuredFormatDisplay("{str}")>]
@@ -108,7 +108,7 @@ type GenericFormula<'G0, 'G1, 'Gn> =
     static member inline IsTautology x =
       let rec it = function
         | G0 x -> isTautology x
-        | G1 (o, x) -> o |> isTautologyWhen (it x)
+        | G1 (o, x)  -> o |> isTautologyWhen (it x)
         | Gn (n, xs) -> n |> isTautologyWhen (xs |> Seq.map it)
       it x
 
@@ -144,12 +144,14 @@ let inline DisjunctSumInSet    (var: string, xs, fml: GenericFormula<_, _, _>) =
   }
   Gn (LDisjunction, xs)
 
-let inline reduce (fml: GenericFormula<_, _, _>) =
+let inline reduce (fml: GenericFormula< ^a, ^b, ^c >) : GenericFormula< ^a, ^b, ^c > =
   let inline mapTruth x =
     x |> Option.map (function true -> AtomicTrue ty<_> | false -> AtomicFalse ty<_>) 
   let rec r = function
     | G0 a -> G0 (isTautology a |> mapTruth ?| a)
-    | G1 (x, y) -> failwith "impossible"; G1 (x, y)
+    | G1 (x, y) ->
+      let g1 = G1 (x, r y)
+      isTautology g1 |> mapTruth |> Option.map G0 ?| g1
     | Gn (n, xs) ->
       let gn = Gn (n, xs |> Seq.map r)
       isTautology gn |> mapTruth |> Option.map G0 ?| gn
@@ -213,17 +215,22 @@ type NNFAtomicOrNegate<'Comparison, 'Term, 'Negatee> =
       match x with
         | NNFAtomic a -> toSeq a
         | NNFNegate n -> toSeq n
-    static member AtomicTrue = NNFAtomic AFTrue
-    static member AtomicFalse = NNFAtomic AFFalse
+    static member AtomicTrue  : NNFAtomicOrNegate<'Comparison, 'Term, 'Negatee> = NNFAtomic AFTrue
+    static member AtomicFalse : NNFAtomicOrNegate<'Comparison, 'Term, 'Negatee> = NNFAtomic AFFalse
     static member inline IsTautology x =
       match x with
         | NNFAtomic a -> isTautology a
         | NNFNegate n -> isTautology n |> Option.map not
 
+///     TautologyWhen
+[<Struct>]
+type Empty = Empty with
+  static member inline IsTautologyWhen (Empty, x: bool option) = x
+
 type NegationNormalForm<'Comparison, 'Term, 'Negatee> =
   GenericFormula<
     NNFAtomicOrNegate<'Comparison, 'Term, 'Negatee>,
-    unit,
+    Empty,
     LogicalOp>
 
 [<Struct; StructuredFormatDisplay("{str}")>]
