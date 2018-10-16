@@ -20,17 +20,9 @@ open PresburgerFs.Expr
 open PresburgerFs.Formula
 open FSharpPlus
 
-let rec eliminateForall (fml: Formula<_>) : FormulaWithoutForall<_> =
-  match fml with
-    | G0 a -> G0 a
-    | Gn (c, xs) -> Gn (c, xs |> Seq.map eliminateForall)
-    | G1 (FNegate, n) -> G1 (FNegate, eliminateForall n)
-    | G1 (FQuantifier (QFEExists v), n) -> G1 (FQuantifier (QENExists v), eliminateForall n)
-    | G1 (FQuantifier (QFEForall v), n) -> G1 (FQuantifier (QENNotExists v), G1 (FNegate, eliminateForall n))
-
-let rec toPrenexForm (fml: FormulaWithoutForall<_>) : PrenexFormula<_> =
+let rec toPrenexForm (fml: Formula<_>) : PrenexFormula<_> =
   let treatBinop (cstr: PrenexMatrix<_> seq -> PrenexMatrix<_>)
-                 (xs: FormulaWithoutForall<_> seq)
+                 (xs: Formula<_> seq)
                  : PrenexFormula<_> =
     assert (Seq.isEmpty xs |> not)
     let h, t = Seq.head xs, Seq.tail xs
@@ -44,14 +36,33 @@ let rec toPrenexForm (fml: FormulaWithoutForall<_>) : PrenexFormula<_> =
     | G0 a -> PFMatrix (G0 a)
     | Gn (n, xs) -> treatBinop (fun xs -> Gn (n, xs)) xs
     | G1 (FNegate, x) ->
-      match toPrenexForm x with
-        | PFQuantifier (QENExists v, s)    -> PFQuantifier (QENNotExists v, s)
-        | PFQuantifier (QENNotExists v, s) -> PFQuantifier (QENExists v, s)
-        | PFMatrix m -> PFMatrix (G1 (Negate, m))
+      match x with
+        | G1 (FQuantifier (QFEForall v), scope) ->
+          PFQuantifier (QFEExists v, G1 (FNegate, scope) |> toPrenexForm)
+        | G1 (FQuantifier (QFEExists v), scope) ->
+          PFQuantifier (QFEForall v, G1 (FNegate, scope) |> toPrenexForm)
+        | G1 (FNegate, x) -> toPrenexForm x
+        | Gn (LConjunction, xs) ->
+          Gn (LDisjunction, xs |> Seq.map (fun x -> G1 (FNegate, x))) |> toPrenexForm
+        | Gn (LDisjunction, xs) ->
+          Gn (LConjunction, xs |> Seq.map (fun x -> G1 (FNegate, x))) |> toPrenexForm
+        | G0 x -> PFMatrix (G1 (Negate, G0 x))
     | G1 (FQuantifier q, scope) ->
       PFQuantifier (q, toPrenexForm scope)
 
-let toNegationNormalForm (fml: PrenexFormula<_>) : PrenexNNFFormula<_> =
+let rec eliminateForall (fml:PrenexFormula<_>) : PrenexFormulaWithoutForall<_> =
+  match fml with
+    | PFQuantifier (QFEExists v, x) -> PFQuantifier (QENExists v, eliminateForall x)
+    | PFQuantifier (QFEForall v, x) ->
+      PFQuantifier (QENNotExists v, 
+        match eliminateForall x with
+          | PFMatrix x -> G1 (Negate, x) |> PFMatrix
+          | PFQuantifier (QENExists v, x)    -> PFQuantifier (QENNotExists v, x)
+          | PFQuantifier (QENNotExists v, x) -> PFQuantifier (QENExists v, x)
+      )
+    | PFMatrix x -> PFMatrix x
+
+let toNegationNormalForm (fml: PrenexFormulaWithoutForall<_>) : PrenexNNFFormula<_> =
   let rec f = function
     | G0 a -> G0 (NNFAtomic a)
     | Gn (n, xs) -> Gn (n, xs |> Seq.map f)
@@ -101,21 +112,23 @@ let inline removeDuplicatesInAtomic (fml: PrenexNNFLtFormula<_>) : PrenexNNFLtFo
       | NNFAtomic (AFComparison (ComparisonLt, lhs, rhs)) ->
         let inline ac x = NNFAtomic (AFComparison x)
         match Expression.count var lhs, Expression.count var rhs with
-          | (0, _) | (_, 0) -> ac (ComparisonLt, lhs, rhs)
+          | (0, n) | (n, 0) when n <> 0 -> ac (ComparisonLt, lhs, rhs)
           | (ln, rn) ->
             let diff = max ln rn - min ln rn
-            if ln > rn then 
-              ac (ComparisonLt, lhs - Expression.multiply diff (Expression.variable var), rhs |> Expression.subst var (Expression.constant 0))
+            if diff = 0 then
+              ac (ComparisonLt, lhs |> Expression.remove var, rhs |> Expression.remove var)
             else
-              ac (ComparisonLt, lhs |> Expression.subst var (Expression.constant zero), rhs - Expression.multiply diff (Expression.variable var))
+              if ln > rn then 
+                ac (ComparisonLt, lhs - Expression.multiply diff (Expression.variable var), rhs |> Expression.remove var)
+              else
+                ac (ComparisonLt, lhs |> Expression.remove var, rhs - Expression.multiply diff (Expression.variable var))
       | x -> x
     )
   let qvs = fml |> toSeq |> Seq.map varOfQuantifier
-  fml |> map (fun x ->
+  fml |>> fun x ->
     qvs |> Seq.fold (flip rdOver) x
-  )
 
-let inline lcm (x: ^n) (y: ^n) =
+let inline private lcm (x: ^n) (y: ^n) =
   abs (x * y) / FSharpPlus.Math.Generic.gcd x y
 
 let inline normalizeAllCoefficientsToOne (fml: PrenexNNFLtFormula<_>) : PrenexNNFLtFormula<_> =
@@ -124,6 +137,7 @@ let inline normalizeAllCoefficientsToOne (fml: PrenexNNFLtFormula<_>) : PrenexNN
       mtx |> toSeq
           |> Seq.collect toSeq
           |> Seq.map (Expression.count var)
+          |> Seq.filter ((<>) 0)
           |> Seq.fold lcm one
 
     let inline cfOne expr =
@@ -140,18 +154,27 @@ let inline normalizeAllCoefficientsToOne (fml: PrenexNNFLtFormula<_>) : PrenexNN
                 // During this manipulation, atomic formulas must only contain
                 // 1 occurrence of the variable at most.
                 assert (not (Expression.contains var lhs) || not (Expression.contains var rhs)) 
-                
-                let ml = lcm / (Expression.count var lhs + Expression.count var rhs)
-                if Expression.count var lhs > 0 || Expression.count var rhs < 0 then
-                  AFComparison (ComparisonLt, Expression.multiply ml lhs |> cfOne, Expression.multiply ml rhs |> cfZero)
+
+                let count = Expression.count var lhs + Expression.count var rhs
+                if count = 0 then a
                 else
-                  AFComparison (ComparisonLt, Expression.multiply ml lhs |> cfZero, Expression.multiply ml rhs |> cfOne)
+                  let ml = lcm / count
+                  if Expression.count var lhs > 0 || Expression.count var rhs < 0 then
+                    AFComparison (ComparisonLt, Expression.multiply ml lhs |> cfOne, Expression.multiply ml rhs |> cfZero)
+                  else
+                    AFComparison (ComparisonLt, Expression.multiply ml lhs |> cfZero, Expression.multiply ml rhs |> cfOne)
               | AFDivisiblity dc ->
-                let ml = lcm / (dc.dividend |> Expression.count var)
-                dc |> bimap ((*) (uint32 ml)) (Expression.multiply ml >> cfOne) |> AFDivisiblity
+                let count = dc.dividend |> Expression.count var
+                if count = 0 then a
+                else
+                  let ml = lcm / count
+                  dc |> bimap ((*) (uint32 ml)) (Expression.multiply ml >> cfOne) |> AFDivisiblity
         | NNFNegate dc ->
-          let ml = lcm / (dc.dividend |> Expression.count var)
-          dc |> bimap ((*) (uint32 ml)) (Expression.multiply ml >> cfOne) |> NNFNegate
+          let count = dc.dividend |> Expression.count var
+          if count = 0 then NNFNegate dc
+          else
+            let ml = lcm / count
+            dc |> bimap ((*) (uint32 ml)) (Expression.multiply ml >> cfOne) |> NNFNegate
         )
     
     Conjunction (
@@ -159,9 +182,8 @@ let inline normalizeAllCoefficientsToOne (fml: PrenexNNFLtFormula<_>) : PrenexNN
       qff'
     )
   let qvs = fml |> toSeq |> Seq.map varOfQuantifier
-  fml |> map (fun x ->
+  fml |>> fun x ->
     qvs |> Seq.fold (flip nmOver) x
-  )
 
 let inline eliminateQuantifiers (fml: PrenexNNFLtFormula<_>) : EliminatedFormula<_> =
   let inline eliminateOver (var: string) (mtx: PrenexNNFLtMatrix<_>) : EliminatedFormula<_> =
@@ -180,19 +202,21 @@ let inline eliminateQuantifiers (fml: PrenexNNFLtFormula<_>) : EliminatedFormula
       let qffNegInf =
         mtx |> map
           (function
-            | NNFAtomic (AFComparison (_, lhs, _)) when lhs |> Expression.contains var -> AFTrue  |> NNFAtomic
-            | NNFAtomic (AFComparison (_, _, rhs)) when rhs |> Expression.contains var -> AFFalse |> NNFAtomic
+            | NNFAtomic (AFComparison (_, lhs, _))
+              when lhs |> Expression.contains var -> AFTrue  |> NNFAtomic
+            | NNFAtomic (AFComparison (_, _, rhs))
+              when rhs |> Expression.contains var -> AFFalse |> NNFAtomic
             | x -> x
           )
       DisjunctSumForRange (var, delta, qffNegInf)
     
     let solutionCanBeInfinitelySmall =
       let rec check = function
-        | G0 (NNFAtomic (AFComparison (_, lhs, rhs)))
-          when lhs |> Expression.isConstant |> Option.isSome && rhs |> Expression.contains var -> false
+        | G0 (NNFAtomic (AFComparison (_, _, rhs)))
+          when rhs |> Expression.contains var -> false
         | G0 _ -> true
-        | Gn (LConjunction, xs) -> xs |> Seq.exists check
-        | Gn (LDisjunction, xs) -> xs |> Seq.forall check
+        | Gn (LConjunction, xs) -> xs |> Seq.forall check
+        | Gn (LDisjunction, xs) -> xs |> Seq.exists check
         | G1 _ -> failwith "impossible"
       check mtx
     
@@ -217,7 +241,7 @@ let inline eliminateQuantifiers (fml: PrenexNNFLtFormula<_>) : EliminatedFormula
       let f52 : PrenexNNFLtMatrix<_> =
         DisjunctSumForRange (var, delta,
           DisjunctSumInSet (newName, b |> Seq.toList,
-            mtx |> map (map (Expression.subst var (Expression.variable var + Expression.variable newName)))
+            mtx |>> map (Expression.subst var (Expression.variable var + Expression.variable newName))
           )
         )
       Disjunction (G0 f51, G0 f52)
@@ -228,16 +252,40 @@ let inline eliminateQuantifiers (fml: PrenexNNFLtFormula<_>) : EliminatedFormula
       eliminateOver v qff
     | PFQuantifier (QENExists v, x) ->
       eliminate x >>= (eliminateOver v)
-    | PFMatrix _ -> failwith "impossible"
+    | PFMatrix x -> G0 x
   eliminate fml
 
-let inline eliminate (fml: Formula< ^a >) =
-  fml |> eliminateForall
-      |> toPrenexForm
-      |> toNegationNormalForm
-      |> eliminateCompareOps
-      |> map reduce
-      |> removeDuplicatesInAtomic
-      |> normalizeAllCoefficientsToOne
-      |> eliminateQuantifiers
-      |> map reduce
+let inline eliminate (fml: Formula< ^a >) : EliminatedFormula< ^a > =
+  #if DEBUG
+  let sw = System.Diagnostics.Stopwatch()
+  sw.Start()
+  #endif
+  let inline check msg x =
+  #if DEBUG
+    printfn "%s: %ims" msg sw.ElapsedMilliseconds
+    sw.Stop()
+    sw.Reset()
+    sw.Start()
+  #endif
+    x
+
+  let res =
+    fml |> toPrenexForm
+        |> check "toPrenexForm"
+        |> eliminateForall
+        |> check "eliminateForall"
+        |> toNegationNormalForm
+        |> check "toNegationNormalForm"
+        |> eliminateCompareOps
+        |> check "eliminateCompareOps"
+        |> removeDuplicatesInAtomic
+        |> check "removeDuplicatesInAtomic"
+        |> normalizeAllCoefficientsToOne
+        |> check "normalizeAllCoefficientsToOne"
+        |> eliminateQuantifiers
+        |> check "eliminateQuantifiers"
+  
+  #if DEBUG
+  sw.Stop()
+  #endif
+  res
