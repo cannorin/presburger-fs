@@ -14,29 +14,24 @@
 // along with Presburger-fs.  If not, see <https://www.gnu.org/licenses/>.
 //
 // Copyright 2018 cannorin
-
-module PresburgerFs.Main
-open PresburgerFs.Expr
-open PresburgerFs.Formula
-open PresburgerFs.Elimination
-open PresburgerFs.Dsl
-module Generic = FSharpPlus.Operators
+[<AutoOpen>]
+module PresburgerFs.Debug
 
 #if DEBUG
-let inline check fml =
-  let inline show fml =
-    printfn "<=> %A" fml
-    fml
-  printfn "    %A" fml
-  fml |> toPrenexForm |> show
-      |> eliminateForall |> show
-      |> toNegationNormalForm |> show
-      |> eliminateCompareOps |> show
-      |> Generic.map reduce |> show
-      |> removeDuplicatesInAtomic |> show
-      |> normalizeAllCoefficientsToOne |> show
-      |> eliminateQuantifiers |> show
-      |> reduce |> show
-
-PresburgerFs.Tests.run ()
+let sw = System.Diagnostics.Stopwatch()
 #endif
+let inline startClock () =
+#if DEBUG
+  sw.Stop()
+  sw.Reset()
+  sw.Start()
+#endif
+  ()
+let inline check msg x =
+#if DEBUG
+  let es = sw.ElapsedMilliseconds
+  if es > 100L then
+    printfn "%s: %ims" msg es
+  startClock()
+#endif
+  x

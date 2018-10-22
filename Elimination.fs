@@ -187,16 +187,18 @@ let inline normalizeAllCoefficientsToOne (fml: PrenexNNFLtFormula<_>) : PrenexNN
 
 let inline eliminateQuantifiers (fml: PrenexNNFLtFormula<_>) : EliminatedFormula<_> =
   let inline eliminateOver (var: string) (mtx: PrenexNNFLtMatrix<_>) : EliminatedFormula<_> =
+    let atomics = mtx |> toSeq |> Seq.distinct |> Seq.cache
+
+    startClock ()
     let delta =
-      mtx |> toSeq
-          |> Seq.choose (function
-              | NNFAtomic (AFDivisiblity dc)
-              | NNFNegate dc -> Some dc
-              | _ -> None
-             )
-          |> Seq.filter (fun dc -> dc.dividend |> Expression.contains var)
-          |> Seq.map (fun dc -> int dc.divisor)
-          |> Seq.fold lcm 1
+      atomics |> Seq.fold (fun state -> 
+               function
+                 | NNFAtomic (AFDivisiblity dc)
+                 | NNFNegate dc when Expression.contains var dc.dividend ->
+                   lcm state (int dc.divisor)
+                 | _ -> state
+             ) 1
+    check "delta" ()
     
     let f51 : PrenexNNFLtMatrix<_> =
       let qffNegInf =
@@ -209,6 +211,7 @@ let inline eliminateQuantifiers (fml: PrenexNNFLtFormula<_>) : EliminatedFormula
             | x -> x
           )
       DisjunctSumForRange (var, delta, qffNegInf)
+    check "f51" ()
     
     let solutionCanBeInfinitelySmall =
       let rec check = function
@@ -219,32 +222,42 @@ let inline eliminateQuantifiers (fml: PrenexNNFLtFormula<_>) : EliminatedFormula
         | Gn (LDisjunction, xs) -> xs |> Seq.exists check
         | G1 _ -> failwith "impossible"
       check mtx
+    check "solutionCanBeInfinitelySmall" ()
     
-    if solutionCanBeInfinitelySmall then G0 f51
+    if solutionCanBeInfinitelySmall then
+      G0 f51 |> reduce |> check "reduce(f51)"
     else
       let b =
-        mtx |> toSeq
-            |> Seq.choose (function
-                | NNFAtomic (AFComparison (_, lhs, rhs))
-                  when rhs |> Expression.contains var ->
-                    let rhs' = rhs |> Expression.remove var
-                    Some (lhs - rhs')
-                | _ -> None
-               )
+        atomics
+          |> Seq.choose (function
+              | NNFAtomic (AFComparison (_, lhs, rhs))
+                when rhs |> Expression.contains var ->
+                  let rhs' = rhs |> Expression.remove var
+                  Some (lhs - rhs')
+              | _ -> None
+             )
+          |> Seq.distinct
+          |> Seq.cache
+      check "b" ()
+
       let newName =
         let exprs =
-          mtx |> toSeq
-              |> Seq.collect toSeq
-              |> Seq.toArray
+          atomics |> Seq.collect (toSeq >> Seq.collect fvOf)
+                  |> Seq.cache
         var |> Seq.unfold (fun v -> let v' = sprintf "%s'" v in Some (v',v'))
-            |> Seq.find (fun v -> exprs |> Seq.forall (Expression.contains v >> not))
+            |> Seq.find (fun v -> exprs |> Seq.contains v |> not)
+      check "newName" ()
+
       let f52 : PrenexNNFLtMatrix<_> =
         DisjunctSumForRange (var, delta,
-          DisjunctSumInSet (newName, b |> Seq.toList,
+          DisjunctSumInSet (newName, b,
             mtx |>> map (Expression.subst var (Expression.variable var + Expression.variable newName))
           )
         )
-      Disjunction (G0 f51, G0 f52)
+      check "f52" ()
+
+      Disjunction (G0 f51, G0 f52) |> reduce |> check "reduce(f51 v f52)"
+
   let rec eliminate : PrenexNNFLtFormula<_> -> EliminatedFormula<_> = function
     | PFQuantifier (QENNotExists v, x) ->
       G1 (Negate, eliminate (PFQuantifier (QENExists v, x)))
@@ -252,23 +265,12 @@ let inline eliminateQuantifiers (fml: PrenexNNFLtFormula<_>) : EliminatedFormula
       eliminateOver v qff
     | PFQuantifier (QENExists v, x) ->
       eliminate x >>= (eliminateOver v)
-    | PFMatrix x -> G0 x
+    | PFMatrix x ->
+      G0 x
   eliminate fml
 
 let inline eliminate (fml: Formula< ^a >) : EliminatedFormula< ^a > =
-  #if DEBUG
-  let sw = System.Diagnostics.Stopwatch()
-  sw.Start()
-  #endif
-  let inline check msg x =
-  #if DEBUG
-    printfn "%s: %ims" msg sw.ElapsedMilliseconds
-    sw.Stop()
-    sw.Reset()
-    sw.Start()
-  #endif
-    x
-
+  startClock ()
   let res =
     fml |> toPrenexForm
         |> check "toPrenexForm"
@@ -278,12 +280,15 @@ let inline eliminate (fml: Formula< ^a >) : EliminatedFormula< ^a > =
         |> check "toNegationNormalForm"
         |> eliminateCompareOps
         |> check "eliminateCompareOps"
+        |> map reduce
+        |> check "map reduce"
         |> removeDuplicatesInAtomic
         |> check "removeDuplicatesInAtomic"
         |> normalizeAllCoefficientsToOne
         |> check "normalizeAllCoefficientsToOne"
         |> eliminateQuantifiers
         |> check "eliminateQuantifiers"
+        |> reduce
   
   #if DEBUG
   sw.Stop()

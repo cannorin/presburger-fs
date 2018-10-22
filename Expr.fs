@@ -17,7 +17,6 @@
 
 module PresburgerFs.Expr
 open FSharp.Collections
-open System
 
 type countmap<'a, 'num when 'a: comparison> = Map<'a, 'num>
 
@@ -132,7 +131,8 @@ type Expr =
         else Some false
       else None
     static member inline multiply (a: Expr, i: int) = a * i
-    static member inline FV (Expr (_, vars)) = vars |> CountMap.toSeq |> Seq.map fst |> Set.ofSeq
+    static member inline FV (Expr (_, vars)) =
+      vars |> CountMap.toSeq |> Seq.map fst
 
 let inline EVar name = Expr (zero, CountMap.singleton name)
 let inline ENum num  = Expr (num, Map.empty)

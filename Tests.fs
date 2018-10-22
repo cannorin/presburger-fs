@@ -28,7 +28,6 @@ module TestObjects =
   type TestFormula =
     | TFTrue | TFFalse
     | TFComparison of ComparisonOps * Expr * Expr
-    | TFDivisibility of PositiveInt * Expr
     | TFConjunction of TestFormula * TestFormula
     | TFDisjunction of TestFormula * TestFormula
     | TFNegate of TestFormula
@@ -38,20 +37,18 @@ module TestObjects =
       override this.ToString() = sprintf "%A" this
       static member FV x =
         match x with
-          | TFComparison (_, l, r) -> Set.union (fvOf l) (fvOf r)
-          | TFDivisibility (_, e) -> fvOf e
+          | TFComparison (_, l, r) -> Seq.append (fvOf l) (fvOf r)
           | TFConjunction (l, r)
-          | TFDisjunction (l, r) -> Set.union (fvOf l) (fvOf r)
+          | TFDisjunction (l, r) -> Seq.append (fvOf l) (fvOf r)
           | TFNegate x -> fvOf x
           | TFForall (v, x)
-          | TFExists (v, x) -> fvOf x |> Set.remove v
-          | TFTrue | TFFalse -> Set.empty
+          | TFExists (v, x) -> fvOf x |> Seq.filter ((<>) v)
+          | TFTrue | TFFalse -> Seq.empty
 
   let rec toGenericFormula (x: TestFormula) : Formula<Expr> =
     match x with
       | TFTrue -> G0 (AFTrue) | TFFalse -> G0 (AFFalse)
       | TFComparison (c, l, r) -> G0 (AFComparison (c, l, r))
-      | TFDivisibility (n, e) -> G0 (AFDivisiblity { divisor = uint32 n.Get; dividend = e })
       | TFConjunction (l, r) -> Conjunction (toGenericFormula l, toGenericFormula r)
       | TFDisjunction (l, r) -> Disjunction (toGenericFormula l, toGenericFormula r)
       | TFNegate x -> G1 (FNegate, toGenericFormula x)
@@ -83,7 +80,7 @@ module TestObjects =
           gen {
             let! v =
               if List.isEmpty varlist then
-                Gen.constant (ENum 1)
+                Gen.constant (ENum 0)
               else Gen.elements varlist |> Gen.map EVar
             let! m = Arb.generate<int>
             return m * v
@@ -100,10 +97,6 @@ module TestObjects =
                    Arb.generate<ComparisonOps>
                    (genExprFromVars varlist)
                    (genExprFromVars varlist)
-        let div =
-          Gen.map2 (fun n e -> TFDivisibility (n, e))
-                   Arb.generate<PositiveInt>
-                   (genExprFromVars varlist)
         let op2 cstr =
           Gen.map2 (fun l r -> cstr (l, r))
                    (fmlgen (divideBy 2 size) varlist)
@@ -113,22 +106,26 @@ module TestObjects =
         let qf cstr =
           gen {
             let! name = Arb.generate<string>
+            let name =
+              let vars =
+                Seq.unfold (fun state -> let a = sprintf "%s'" state in Some (state, a)) name
+              vars |> Seq.find (fun x -> varlist |> List.contains x |> not)
+                
             let! body = fmlgen (divideBy 3 size) (name :: varlist)
             return cstr (name, body)
           }
         
         if size > 2 then
           return! Gen.frequency [ 
-            1, cmpl;
-            1, div;
-            2, op2 TFConjunction;
-            2, op2 TFDisjunction;
-            2, neg;
-            3, qf TFForall;
-            3, qf TFExists
+            3, cmpl;
+            1, op2 TFConjunction;
+            1, op2 TFDisjunction;
+            1, neg;
+            2, qf TFForall;
+            2, qf TFExists
           ]
         else
-          return! Gen.oneof [ cmpl; div ]
+          return! cmpl
       }
     Gen.sized (fun i -> fmlgen i varlist)
 
@@ -143,18 +140,54 @@ module TestObjects =
 
 open TestObjects
 
+type TautologicalProperties =
+  static member `` Comparison works correctly ``
+    (co: ComparisonOps) (a: int) (b: int) =
+    let expected =
+      match co with
+        | CompEq -> a = b | CompLt -> a < b | CompGt -> a > b
+        | CompLte -> a <= b | CompGte -> a >= b
+    let result =
+      TFComparison (co, ENum a, ENum b) |> toGenericFormula |> eliminate
+    result = truthValue expected
+  
+  static member `` Negation of comparison works correctly ``
+    (co: ComparisonOps) (a: int) (b: int) =
+    let expected =
+      match co with
+        | CompEq -> a = b | CompLt -> a < b | CompGt -> a > b
+        | CompLte -> a <= b | CompGte -> a >= b
+    let result =
+      TFNegate (TFComparison (co, ENum a, ENum b)) |> toGenericFormula |> eliminate
+    result = truthValue (not expected)
+
 type ClosedFormulaProperties =
-  static member ``Every closed formula is either valid or unsatisfiable``
+  static member `` Every closed formula is either valid or unsatisfiable ``
     (ClosedTestFormula fml) =
-    printfn "%A" fml
     let fml' = fml |> toGenericFormula |> eliminate
-    fvOf fml' |> Set.isEmpty
+    fml' = truthValue true || fml' = truthValue false
+  
+  static member `` Every closed formula and its negation cannot have the same truth value ``
+    (ClosedTestFormula fml) =
+    let nfml = TFNegate fml
+    let e x = x |> toGenericFormula |> eliminate
+    e fml <> e nfml
+
+type FormulaProperties =
+  static member `` Free variables should not increase after elimination ``
+    (fml: TestFormula) =
+    let fml = toGenericFormula fml
+    let fvBefore = fvOf fml |> Set.ofSeq
+    let fvAfter  = eliminate fml |> fvOf |> Set.ofSeq
+    Set.isSubset fvAfter fvBefore
 
 let run () =
   Arb.register<StringName>() |> ignore
   Arb.register<Generators>() |> ignore
 
-  let config = { Config.Verbose with MaxTest = 10 }
+  let config = { Config.Quick with MaxTest = 100; EndSize=40 }
+  Check.All<TautologicalProperties> config
   Check.All<ClosedFormulaProperties> config
+  Check.All<FormulaProperties> config
 
 #endif

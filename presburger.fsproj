@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="prelude.fs" />
+    <Compile Include="Debug.fs" />
     <Compile Include="Expr.fs" />
     <Compile Include="Formula.fs" />
     <Compile Include="Elimination.fs" />

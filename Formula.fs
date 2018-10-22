@@ -34,10 +34,10 @@ let inline reduceBy (op: ^Op) (cstr: ^Arg -> ^Fml) (arg: ^Arg) : ^Fml =
   (^Op: (static member ReduceBy: ^Op * (^Arg -> ^Fml) * ^Arg -> ^Fml) op, cstr, arg)
 
 let inline fvOf (fml: ^Fml) =
-  (^Fml: (static member FV: ^Fml -> Set<string>) fml)
+  (^Fml: (static member FV: ^Fml -> seq<string>) fml)
 
-let inline filterFv (o: ^Op) (fv: Set<string>) =
-  (^Op: (static member FilterFV: ^Op * Set<string> -> Set<string>) o,fv)
+let inline filterFv (o: ^Op) (fv: seq<string>) =
+  (^Op: (static member FilterFV: ^Op * seq<string> -> seq<string>) o,fv)
 
 ///     Bifunctor<nat, 'Term>, Foldable<'Term>, Tautology, Reducible
 [<Struct; StructuredFormatDisplay("{str}")>]
@@ -73,8 +73,8 @@ AtomicFormula<'Comparison, 'Term> =
     static member inline FV x =
       match x with
         | AFDivisiblity dc -> fvOf dc
-        | AFComparison (_, l, r) -> Set.union (fvOf l) (fvOf r)
-        | _ -> Set.empty
+        | AFComparison (_, l, r) -> Seq.append (fvOf l) (fvOf r)
+        | _ -> Seq.empty
     static member Map (x, f) =
       match x with
         | AFComparison (c, l, r) -> AFComparison (c, f l, f r)
@@ -111,7 +111,7 @@ type GenericFormula< 'G0, 'G1, 'Gn > =
       let rec fv = function
         | G0 x -> fvOf x
         | G1 (o, x) -> fv x |> filterFv o
-        | Gn (n, xs) -> xs |> Seq.map fv |> Set.unionMany |> filterFv n
+        | Gn (n, xs) -> xs |> Seq.collect fv |> filterFv n
       fv x
     static member inline (>>=) (x, f) =
       let rec bind = function
@@ -124,7 +124,7 @@ type GenericFormula< 'G0, 'G1, 'Gn > =
       let rec ts = function
         | G0 x -> Seq.singleton x
         | G1 (_, x) -> ts x
-        | Gn (_, xs) -> xs |> Seq.map ts |> Seq.concat
+        | Gn (_, xs) -> xs |> Seq.collect ts
       ts x
     static member inline TruthValue b = G0 (truthValue b)
     static member inline Reduce fml =
@@ -145,37 +145,46 @@ type LogicalOp = LConjunction | LDisjunction
     member this.str = match this with LConjunction -> " ^ " | LDisjunction -> " v "
     static member inline FilterFV (_: LogicalOp, xs) = xs
     static member inline ReduceBy (op, cstr: ^Fml seq -> ^Fml, xs: ^Fml seq) : ^Fml =
-      let xs = xs |> Seq.cache
+      startClock ()
+      let xs =
+        xs |> Seq.map (fun x ->
+                if x = truthValue true then Choice1Of2 true
+                else if x = truthValue false then Choice1Of2 false
+                else Choice2Of2 x
+              )
+           |> Seq.cache
+      let inline isTruth (b: bool) x = match x with Choice1Of2 b' -> b = b' | _ -> false
+      let inline rem x = match x with Choice2Of2 x -> Some x | Choice1Of2 _ -> None
       match op with
         | LConjunction ->
-          if xs |> Seq.exists ((=) (truthValue false)) then truthValue false
+          if xs |> Seq.exists (isTruth false) |> check "CONJ exists false" then truthValue false
           else
-            let xs = xs |> Seq.filter ((<>) (truthValue true)) |> Seq.cache
+            let xs = xs |> Seq.choose rem |> Seq.cache |> check "choose rem"
             if Seq.isEmpty xs then truthValue true
             else if Seq.length xs = 1 then Seq.head xs
             else cstr xs
         | LDisjunction ->
-          if xs |> Seq.exists ((=) (truthValue true)) then truthValue true
+          if xs |> Seq.exists (isTruth true) |> check "DISJ exists true " then truthValue true
           else
-            let xs = xs |> Seq.filter ((<>) (truthValue false)) |> Seq.cache
-            if Seq.isEmpty xs then truthValue false
-            else if Seq.length xs = 1 then Seq.head xs
-            else cstr xs
+            let xs' = xs |> Seq.choose rem |> Seq.cache |> check "choose rem"
+            if Seq.isEmpty xs' then xs |> Seq.exists (isTruth false) |> not |> truthValue |> check "DISJ exists false"
+            else if Seq.length xs' = 1 then Seq.head xs'
+            else cstr xs'
 
 let inline Conjunction (l, r) = Gn (LConjunction, seq [l; r])
 let inline Disjunction (l, r) = Gn (LDisjunction, seq [l; r])
 let inline DisjunctSumForRange (var: string, upto: int, fml: GenericFormula<_, _, _>) =
-  let xs = seq {
-    for i = 1 to upto do
-      yield fml |> map (map (Expression.subst var (Expression.constant i)))
-  }
-  Gn (LDisjunction, xs |> Seq.cache)
+  let xs =
+    Seq.init upto (fun i ->
+      fml |> map (map (Expression.subst var (Expression.constant (i+1))))
+    ) |> Seq.cache
+  Gn (LDisjunction, xs)
 let inline DisjunctSumInSet    (var: string, xs, fml: GenericFormula<_, _, _>) =
-  let xs = seq {
-    for x in xs do
-      yield fml |> map (map (Expression.subst var x))
-  }
-  Gn (LDisjunction, xs |> Seq.cache)
+  let xs =
+    xs |> Seq.map (fun x ->
+      fml |> map (map (Expression.subst var x))
+    ) |> Seq.cache
+  Gn (LDisjunction, xs)
 
 [<Struct; StructuredFormatDisplay("{str}")>]
 type QuantifierForallOrExists = QFEForall of fv:string | QFEExists of ev:string with 
@@ -183,14 +192,14 @@ type QuantifierForallOrExists = QFEForall of fv:string | QFEExists of ev:string 
   member this.str =
     match this with QFEForall x -> sprintf "forall %s." x | QFEExists x -> sprintf "exists %s." x
   static member inline FilterFV (q: QuantifierForallOrExists, xs) =
-    xs |> Set.remove q.var
+    xs |> Seq.filter ((<>) q.var)
 [<Struct; StructuredFormatDisplay("{str}")>]
 type QuantifierExistsOrNotExists = QENExists of ev:string | QENNotExists of nv: string with
   member this.var = match this with QENExists x -> x | QENNotExists x -> x
   member this.str =
     match this with QENExists x -> sprintf "exists %s." x | QENNotExists x -> sprintf "not_exists %s." x
-  static member inline FilterFV (q: QuantifierForallOrExists, xs) =
-    xs |> Set.remove q.var
+  static member inline FilterFV (q: QuantifierExistsOrNotExists, xs) =
+    xs |> Seq.filter ((<>) q.var)
 let inline varOfQuantifier (x: ^Q) =
   (^Q: (member var: string) x)
 
@@ -213,9 +222,13 @@ type PrenexForm<'Quantifier, 'Matrix> =
       match this with
         | PFQuantifier (q, p) -> sprintf "%A %A" q p
         | PFMatrix m -> sprintf "%A" m
+    member this.matrix =
+      match this with
+        | PFMatrix m -> m
+        | PFQuantifier (_, p) -> p.matrix
     static member inline FV x =
       let rec fv = function
-        | PFQuantifier (q, p) -> fv p |> Set.remove (varOfQuantifier q)
+        | PFQuantifier (q, p) -> fv p |> Seq.filter ((<>) (varOfQuantifier q))
         | PFMatrix m -> fvOf m
       fv x
     static member (>>=) (x, f) =
